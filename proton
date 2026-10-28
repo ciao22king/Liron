@@ -47,6 +47,8 @@ CURRENT_PREFIX_VERSION="11.0-100"
 PFX="Proton: "
 ld_path_var = "LD_LIBRARY_PATH"
 
+FEX_OFFLINE_COMPILER="FEXOfflineCompiler"
+
 def file_exists(s, *, follow_symlinks):
     if follow_symlinks:
         #'exists' returns False on broken symlinks
@@ -1507,6 +1509,11 @@ fex_application_profiles = {
     }
 }
 
+# Apps that must be translated as a whole instead of call by call. Empty by default:
+# the fallback is normally triggered by the marker written when a call cannot be
+# translated at runtime, or opted into with PROTON_FEX_FULL_TRANSLATION=1.
+fex_full_translation_profiles = {}
+
 class Session:
     def __init__(self):
         self.log_file = None
@@ -1564,6 +1571,72 @@ class Session:
                     "3495730"
                 ]:
             self.env["WINE_DISABLE_GAMESCOPE_MAX_SIZE_HACK"] = "1"
+
+    def fex_cache_dir(self):
+        # Kept next to the prefix so the translated code survives Proton updates,
+        # unlike the runtime cache which lives in a temporary directory.
+        return g_compatdata.path("fex-cache/")
+
+    def fex_full_translation_marker(self):
+        return g_compatdata.path("fex-full-translation")
+
+    def should_translate_whole_app(self):
+        forced = self.env.get("PROTON_FEX_FULL_TRANSLATION")
+        if forced is not None:
+            return nonzero(forced)
+        if os.environ.get("SteamGameId", 0) in fex_full_translation_profiles:
+            return True
+        return file_exists(self.fex_full_translation_marker(), follow_symlinks=False)
+
+    def mark_full_translation(self):
+        # A call could not be translated at runtime. Remember it so that the next
+        # run translates the whole app instead of trying again call by call.
+        makedirs(g_compatdata.base_dir)
+        try:
+            with open(self.fex_full_translation_marker(), "w") as f:
+                f.write("This app could not be translated call by call; "
+                        "it is now translated as a whole.\n")
+        except OSError:
+            pass
+        log("A call could not be translated; the whole app will be translated on the next run.")
+
+    def fex_offline_compiler_path(self):
+        # The offline compiler is a Windows PE, named per guest bitness.
+        for name in [FEX_OFFLINE_COMPILER + "64", FEX_OFFLINE_COMPILER + "32", FEX_OFFLINE_COMPILER]:
+            for candidate in [
+                        g_proton.bin_dir + name,
+                        g_proton.dist_dir + "bin/" + name,
+                        g_proton.lib_dir + "wine/aarch64-windows/" + name,
+                    ]:
+                if file_exists(candidate, follow_symlinks=True):
+                    return candidate
+        return None
+
+    def generate_fex_code_cache(self):
+        # Turn the code maps written while the app ran into persistent translated
+        # caches, so the whole app does not have to be translated again next run.
+        new_codemaps = self.fex_cache_dir() + "codemap/new"
+        if not file_exists(new_codemaps, follow_symlinks=True):
+            return
+        try:
+            if len(os.listdir(new_codemaps)) == 0:
+                return
+        except OSError:
+            return
+
+        compiler = self.fex_offline_compiler_path()
+        if compiler is None:
+            log("No offline compiler found; cannot save the translated app.")
+            return
+
+        log("Translating the whole app and saving it, this may take a while...")
+        # The compiler is a Windows binary; Z: is the mapping of the host root.
+        compiler_nt = "Z:" + compiler.replace("/", "\\")
+        try:
+            subprocess.call([g_proton.wine_bin, compiler_nt, "process-all"], env=self.env,
+                            stderr=self.log_file, stdout=self.log_file)
+        except OSError:
+            log("Failed to save the translated app.")
 
     def init_wine(self):
         if "HOST_LC_ALL" in self.env and len(self.env["HOST_LC_ALL"]) > 0:
@@ -1681,7 +1754,7 @@ class Session:
             return default_value # logging enabled, return specified default when not found
         return False # logging disabled, all false
 
-    def generate_fex_app_config(self):
+    def generate_fex_app_config(self, full_translation=False):
         """
         Translate some environment variables into FEX config which is in files.
         """
@@ -1708,6 +1781,14 @@ class Session:
                 app_config["Config"]["Multiblock"] = "1" if ("Multiblock:1" in config_env) else "0"
         except KeyError:
             pass
+
+        if full_translation:
+            # When a call cannot be translated at runtime, fall back to translating
+            # the whole app and saving it: write the code map for the whole process
+            # and let the persistent cache handle the rest.
+            app_config["Config"]["Multiblock"] = "1"
+            app_config["Config"]["EnableCodeCachingWIP"] = "1"
+            app_config["Config"]["EnableLazyCodeCachingWIP"] = "1"
 
         if "PROTON_LOG" in self.env:
             app_config["Config"]["SilentLog"] = "0" if self.log_enabled_for("fex", True) else "1"
@@ -2077,9 +2158,18 @@ class Session:
                 # https://github.com/microsoft/mimalloc/issues/958
                 self.env["MIMALLOC_DISABLE_REDIRECT"] = "1"
 
+            # Keep the translated code on disk so that an app only has to be
+            # translated once, and make it available to FEX as an NT path.
+            cache_dir = self.fex_cache_dir()
+            makedirs(cache_dir)
+            self.env["FEX_APP_CACHE_LOCATION"] = cache_dir
+            self.env["FEX_APP_CACHE_LOCATION_NT"] = "\\??\\" + cache_dir.replace("/", "\\")
+
+            full_translation = self.should_translate_whole_app()
+
             if not 'FEX_APP_CONFIG' in self.env:
                 # custom per-app config driven by Steam env vars
-                app_config = self.generate_fex_app_config()
+                app_config = self.generate_fex_app_config(full_translation=full_translation)
                 with open(g_compatdata.fex_config_file, 'w') as f:
                     f.write(json.dumps(app_config, indent=2))
                 self.env['FEX_APP_CONFIG'] = g_compatdata.fex_config_file
@@ -2131,6 +2221,14 @@ class Session:
                 log("terminate remote debugger")
                 remote_debug_proc.terminate()
                 remote_debug_proc.communicate()
+
+        if platform.machine() == 'aarch64':
+            if not self.should_translate_whole_app() and rc != 0:
+                # The app exited badly while being translated call by call: assume a
+                # call could not be translated and fall back to translating it whole.
+                self.mark_full_translation()
+            else:
+                self.generate_fex_code_cache()
 
         return rc
 
