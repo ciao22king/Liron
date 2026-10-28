@@ -195,6 +195,17 @@ You need an ARM64 build machine and pass `--target-arch=arm64` to `configure.sh`
 
 It's not possible to use the resulting builds in x86 Steam running via FEX.
 
+On ARM64, x86 and x86-64 code is translated to ARM64 by FEX. By default FEX
+translates one call at a time. When a call cannot be translated, the app fails
+to run. In that case Proton falls back to translating the whole app at once and
+saving the result, so the next run starts from the saved translation instead of
+translating the app again.
+
+The fallback runs automatically after such a failure. It can also be selected
+up front by setting `PROTON_FEX_FULL_TRANSLATION=1`, or disabled with `=0`. The
+saved translation is kept in the `fex-cache` directory next to the prefix, so it
+survives Proton updates.
+
 
 Install Proton locally
 ----------------------
@@ -341,6 +352,7 @@ the Wine prefix. Removing the option will revert to the previous behavior.
 |                       | `WINE_USE_KWIN_HACKS`              | Enable KDE-specific windowing hacks that may improve experience with KDE older than 6.4 on Wayland and KDE older than 6.6 on X11. |
 | `cmdlineappend:`      |                                    | Append the string after the colon as an argument to the game command. May be specified more than once. Escape commas and backslashes with a backslash. |
 | `xalia` or `noxalia`  | `PROTON_USE_XALIA`                 | Enable Xalia, a program that can add a gamepad UI for some keyboard/mouse interfaces, or set to 0 to disable. The default is to enable it dynamically based on window contents. |
+|                       | `PROTON_FEX_FULL_TRANSLATION`      | **ARM64 only.** Translate the whole app at once and save the result, instead of translating one call at a time. Set to 0 to force the default behaviour back. |
 | `fnad3d11`            | `FNA3D_FORCE_DRIVER=D3D11`         | Force FNA to use D3D11 for rendering. |
 | `seccomp`             | `PROTON_USE_SECCOMP`               | **Note: Obsoleted in Proton 5.13.** In older versions, enable seccomp-bpf filter to emulate native syscalls, required for some DRM protections to work. |
 | `d9vk`                | `PROTON_USE_D9VK`                  | **Note: Obsoleted in Proton 5.0.** In older versions, use Vulkan-based DXVK instead of OpenGL-based wined3d for d3d9. |

@@ -44,6 +44,12 @@ user_settings = {
     #Use OpenGL-based wined3d for d3d11, d3d10, and d3d9 instead of Vulkan-based DXVK
 #    "PROTON_USE_WINED3D": "1",
 
+    #On ARM64, translate the whole app at once and save the result instead of
+    #translating one call at a time. Use this when an app fails to run because a
+    #call could not be translated; the launcher also enables it by itself after
+    #such a failure. Set to "0" to force the default behaviour back.
+#    "PROTON_FEX_FULL_TRANSLATION": "1",
+
     #Disable d3d11 entirely
 #    "PROTON_NO_D3D11": "1",
 

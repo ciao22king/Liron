@@ -882,6 +882,27 @@ $(OBJ)/.fex_unixlib-post-source:
 	git -C $(SRCDIR)/FEX rev-parse --short=7 HEAD > $(FEX_UNIXLIB_SRC)/.git_rev
 	touch $@
 
+FEX_OFFLINE_COMPILER := FEXOfflineCompiler
+
+# FEXOfflineCompiler is built for each guest bitness and installed into its own
+# bin directory; collect them into the dist so the launcher can translate a
+# whole app offline and save the result.
+$(OBJ)/.fex-aarch64-post-build:
+	mkdir -p $(DST_DIR)/bin
+	for compiler in $(FEX_aarch64_DST)/bin/$(FEX_OFFLINE_COMPILER)*; do \
+	    [ -f "$$compiler" ] || continue; \
+	    cp -a "$$compiler" $(DST_DIR)/bin/; \
+	done
+	touch $@
+
+$(OBJ)/.fex-arm64ec-post-build:
+	mkdir -p $(DST_DIR)/bin
+	for compiler in $(FEX_arm64ec_DST)/bin/$(FEX_OFFLINE_COMPILER)*; do \
+	    [ -f "$$compiler" ] || continue; \
+	    cp -a "$$compiler" $(DST_DIR)/bin/; \
+	done
+	touch $@
+
 FEX_CONFIG_JSON := $(DST_DIR)/share/fex-emu/Config.json
 $(FEX_CONFIG_JSON): $(SRCDIR)/FEX_Config.json
 	mkdir -p $(dir $@)
