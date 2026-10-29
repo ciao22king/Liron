@@ -206,6 +206,20 @@ up front by setting `PROTON_FEX_FULL_TRANSLATION=1`, or disabled with `=0`. The
 saved translation is kept in the `fex-cache` directory next to the prefix, so it
 survives Proton updates.
 
+The fallback needs two things from FEX, and both are still marked work in
+progress at the FEX revision Proton currently pins:
+
+- FEX writes the recorded code maps, but does not yet load a saved cache back
+  (`ImageTracker::LoadAOTImages` still has its loading calls stubbed out).
+- FEX builds an offline compiler per guest bitness, `FEXOfflineCompiler`, and
+  both builds install the same file name. Proton renames them to
+  `FEXOfflineCompiler32.exe` and `FEXOfflineCompiler64.exe` so the launcher can
+  pick the one matching the app.
+
+Until FEX loads the cache, the saved translation is written but not reused, so
+the fallback does not by itself make an app run. It starts working as soon as
+the pinned FEX revision implements cache loading.
+
 
 Install Proton locally
 ----------------------

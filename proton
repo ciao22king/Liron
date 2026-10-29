@@ -59,6 +59,25 @@ def file_exists(s, *, follow_symlinks):
 def nonzero(s):
     return len(s) > 0 and s != "0"
 
+def pe_is_64bit(path):
+    """Tell whether a Windows PE is 64-bit, from its machine field.
+
+    Returns None when the file cannot be read or is not a PE.
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(2) != b"MZ":
+                return None
+            f.seek(0x3c)
+            offset = int.from_bytes(f.read(4), "little")
+            f.seek(offset)
+            if f.read(4) != b"PE\0\0":
+                return None
+            machine = int.from_bytes(f.read(2), "little")
+    except (OSError, ValueError):
+        return None
+    return machine != 0x014c  # IMAGE_FILE_MACHINE_I386
+
 def prepend_to_env_str(env, variable, prepend_str, separator):
     if variable not in env:
         env[variable] = prepend_str
@@ -1509,11 +1528,6 @@ fex_application_profiles = {
     }
 }
 
-# Apps that must be translated as a whole instead of call by call. Empty by default:
-# the fallback is normally triggered by the marker written when a call cannot be
-# translated at runtime, or opted into with PROTON_FEX_FULL_TRANSLATION=1.
-fex_full_translation_profiles = {}
-
 class Session:
     def __init__(self):
         self.log_file = None
@@ -1577,6 +1591,12 @@ class Session:
         # unlike the runtime cache which lives in a temporary directory.
         return g_compatdata.path("fex-cache/")
 
+    def fex_cache_dir_windows(self):
+        # FEX reads the cache location verbatim and uses it as a Windows path,
+        # and adds its own \??\ prefix when it opens the cache. Give it the host
+        # path through the Z: drive, which maps the host root.
+        return "Z:" + self.fex_cache_dir().replace("/", "\\")
+
     def fex_full_translation_marker(self):
         return g_compatdata.path("fex-full-translation")
 
@@ -1584,8 +1604,6 @@ class Session:
         forced = self.env.get("PROTON_FEX_FULL_TRANSLATION")
         if forced is not None:
             return nonzero(forced)
-        if os.environ.get("SteamGameId", 0) in fex_full_translation_profiles:
-            return True
         return file_exists(self.fex_full_translation_marker(), follow_symlinks=False)
 
     def mark_full_translation(self):
@@ -1600,16 +1618,23 @@ class Session:
             pass
         log("A call could not be translated; the whole app will be translated on the next run.")
 
-    def fex_offline_compiler_path(self):
-        # The offline compiler is a Windows PE, named per guest bitness.
-        for name in [FEX_OFFLINE_COMPILER + "64", FEX_OFFLINE_COMPILER + "32", FEX_OFFLINE_COMPILER]:
-            for candidate in [
-                        g_proton.bin_dir + name,
-                        g_proton.dist_dir + "bin/" + name,
-                        g_proton.lib_dir + "wine/aarch64-windows/" + name,
-                    ]:
-                if file_exists(candidate, follow_symlinks=True):
-                    return candidate
+    def fex_offline_compiler_path(self, guest_is_64bit=None):
+        # FEX builds one offline compiler per guest bitness and they are not
+        # interchangeable: the arm64ec build compiles 64-bit guests, the aarch64
+        # build compiles 32-bit ones. Prefer the one matching the guest.
+        if guest_is_64bit is False:
+            suffixes = ["32", "64", ""]
+        else:
+            suffixes = ["64", "32", ""]
+        for suffix in suffixes:
+            for name in [FEX_OFFLINE_COMPILER + suffix + ".exe", FEX_OFFLINE_COMPILER + suffix]:
+                for candidate in [
+                            g_proton.bin_dir + name,
+                            g_proton.dist_dir + "bin/" + name,
+                            g_proton.lib_dir + "wine/aarch64-windows/" + name,
+                        ]:
+                    if file_exists(candidate, follow_symlinks=True):
+                        return candidate
         return None
 
     def generate_fex_code_cache(self):
@@ -1624,17 +1649,19 @@ class Session:
         except OSError:
             return
 
-        compiler = self.fex_offline_compiler_path()
+        guest_is_64bit = None
+        if len(sys.argv) > 2:
+            guest_is_64bit = pe_is_64bit(sys.argv[2])
+
+        compiler = self.fex_offline_compiler_path(guest_is_64bit)
         if compiler is None:
             log("No offline compiler found; cannot save the translated app.")
             return
 
         log("Translating the whole app and saving it, this may take a while...")
-        # The compiler is a Windows binary; Z: is the mapping of the host root.
-        compiler_nt = "Z:" + compiler.replace("/", "\\")
         try:
-            subprocess.call([g_proton.wine_bin, compiler_nt, "process-all"], env=self.env,
-                            stderr=self.log_file, stdout=self.log_file)
+            subprocess.call([g_proton.wine_bin, "Z:" + compiler.replace("/", "\\"), "process-all"],
+                            env=self.env, stderr=self.log_file, stdout=self.log_file)
         except OSError:
             log("Failed to save the translated app.")
 
@@ -1788,7 +1815,6 @@ class Session:
             # and let the persistent cache handle the rest.
             app_config["Config"]["Multiblock"] = "1"
             app_config["Config"]["EnableCodeCachingWIP"] = "1"
-            app_config["Config"]["EnableLazyCodeCachingWIP"] = "1"
 
         if "PROTON_LOG" in self.env:
             app_config["Config"]["SilentLog"] = "0" if self.log_enabled_for("fex", True) else "1"
@@ -2159,11 +2185,9 @@ class Session:
                 self.env["MIMALLOC_DISABLE_REDIRECT"] = "1"
 
             # Keep the translated code on disk so that an app only has to be
-            # translated once, and make it available to FEX as an NT path.
-            cache_dir = self.fex_cache_dir()
-            makedirs(cache_dir)
-            self.env["FEX_APP_CACHE_LOCATION"] = cache_dir
-            self.env["FEX_APP_CACHE_LOCATION_NT"] = "\\??\\" + cache_dir.replace("/", "\\")
+            # translated once.
+            makedirs(self.fex_cache_dir())
+            self.env["FEX_APP_CACHE_LOCATION"] = self.fex_cache_dir_windows()
 
             full_translation = self.should_translate_whole_app()
 
@@ -2223,12 +2247,14 @@ class Session:
                 remote_debug_proc.communicate()
 
         if platform.machine() == 'aarch64':
-            if not self.should_translate_whole_app() and rc != 0:
+            if self.should_translate_whole_app():
+                # The app was translated as a whole during this run: turn the code
+                # maps it wrote into a saved cache so the next run can reuse it.
+                self.generate_fex_code_cache()
+            elif rc != 0:
                 # The app exited badly while being translated call by call: assume a
                 # call could not be translated and fall back to translating it whole.
                 self.mark_full_translation()
-            else:
-                self.generate_fex_code_cache()
 
         return rc
 
