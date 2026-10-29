@@ -882,25 +882,25 @@ $(OBJ)/.fex_unixlib-post-source:
 	git -C $(SRCDIR)/FEX rev-parse --short=7 HEAD > $(FEX_UNIXLIB_SRC)/.git_rev
 	touch $@
 
+# The offline compiler turns recorded code maps into a saved cache. FEX builds one
+# per guest bitness and both are installed as the same file name, so install them
+# side by side under distinct names: the launcher picks by guest bitness.
+#
+#   aarch64-windows build -> 32-bit guests (wow64)
+#   arm64ec-windows build -> 64-bit guests
 FEX_OFFLINE_COMPILER := FEXOfflineCompiler
+FEX_OFFLINE_COMPILER_DIR := $(DST_DIR)/bin-arm64
 
-# FEXOfflineCompiler is built for each guest bitness and installed into its own
-# bin directory; collect them into the dist so the launcher can translate a
-# whole app offline and save the result.
 $(OBJ)/.fex-aarch64-post-build:
-	mkdir -p $(DST_DIR)/bin
-	for compiler in $(FEX_aarch64_DST)/bin/$(FEX_OFFLINE_COMPILER)*; do \
-	    [ -f "$$compiler" ] || continue; \
-	    cp -a "$$compiler" $(DST_DIR)/bin/; \
-	done
+	mkdir -p $(FEX_OFFLINE_COMPILER_DIR)
+	cp -a $(FEX_aarch64_DST)/bin/$(FEX_OFFLINE_COMPILER).exe \
+	    $(FEX_OFFLINE_COMPILER_DIR)/$(FEX_OFFLINE_COMPILER)32.exe
 	touch $@
 
 $(OBJ)/.fex-arm64ec-post-build:
-	mkdir -p $(DST_DIR)/bin
-	for compiler in $(FEX_arm64ec_DST)/bin/$(FEX_OFFLINE_COMPILER)*; do \
-	    [ -f "$$compiler" ] || continue; \
-	    cp -a "$$compiler" $(DST_DIR)/bin/; \
-	done
+	mkdir -p $(FEX_OFFLINE_COMPILER_DIR)
+	cp -a $(FEX_arm64ec_DST)/bin/$(FEX_OFFLINE_COMPILER).exe \
+	    $(FEX_OFFLINE_COMPILER_DIR)/$(FEX_OFFLINE_COMPILER)64.exe
 	touch $@
 
 FEX_CONFIG_JSON := $(DST_DIR)/share/fex-emu/Config.json

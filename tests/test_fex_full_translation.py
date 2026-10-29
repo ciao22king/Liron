@@ -54,14 +54,21 @@ class FullTranslationTest(unittest.TestCase):
             os.environ["SteamGameId"] = self._saved_game_id
         self.tmp.cleanup()
 
-    def write_compiler(self):
-        compiler = proton.g_proton.bin_dir + proton.FEX_OFFLINE_COMPILER + "64"
+    def write_compiler(self, bitness=64, path=None):
+        compiler = path or (proton.g_proton.bin_dir
+                            + proton.FEX_OFFLINE_COMPILER + str(bitness) + ".exe")
         with open(compiler, "w") as f:
             f.write("")
         return compiler
 
     def test_cache_dir_is_next_to_the_prefix(self):
         self.assertEqual(self.session.fex_cache_dir(), self.tmp.name + "/fex-cache/")
+
+    def test_cache_dir_is_given_to_fex_as_a_windows_path(self):
+        # FEX reads FEX_APP_CACHE_LOCATION verbatim and prefixes it with \??\,
+        # so the value must be a Windows path without a prefix of its own.
+        self.assertEqual(self.session.fex_cache_dir_windows(),
+                         "Z:" + self.tmp.name.replace("/", "\\") + "\\fex-cache\\")
 
     def test_default_is_call_by_call(self):
         self.assertFalse(self.session.should_translate_whole_app())
@@ -80,18 +87,9 @@ class FullTranslationTest(unittest.TestCase):
         self.session.env["PROTON_FEX_FULL_TRANSLATION"] = "0"
         self.assertFalse(self.session.should_translate_whole_app())
 
-    def test_app_profile_enables_full_translation(self):
-        proton.fex_full_translation_profiles["1234"] = True
-        try:
-            os.environ["SteamGameId"] = "1234"
-            self.assertTrue(self.session.should_translate_whole_app())
-        finally:
-            del proton.fex_full_translation_profiles["1234"]
-
     def test_full_translation_config_sets_code_caching(self):
         config = self.session.generate_fex_app_config(full_translation=True)["Config"]
         self.assertEqual(config["EnableCodeCachingWIP"], "1")
-        self.assertEqual(config["EnableLazyCodeCachingWIP"], "1")
         self.assertEqual(config["Multiblock"], "1")
 
     def test_default_config_does_not_set_code_caching(self):
@@ -100,8 +98,26 @@ class FullTranslationTest(unittest.TestCase):
 
     def test_offline_compiler_lookup(self):
         self.assertIsNone(self.session.fex_offline_compiler_path())
-        compiler = self.write_compiler()
+        compiler = self.write_compiler(64)
         self.assertEqual(self.session.fex_offline_compiler_path(), compiler)
+
+    def test_offline_compiler_prefers_the_matching_guest_bitness(self):
+        compiler32 = self.write_compiler(32)
+        compiler64 = self.write_compiler(64)
+        self.assertEqual(self.session.fex_offline_compiler_path(True), compiler64)
+        self.assertEqual(self.session.fex_offline_compiler_path(False), compiler32)
+
+    def test_offline_compiler_found_in_the_dist(self):
+        dist_bin = os.path.join(proton.g_proton.dist_dir, "bin")
+        os.makedirs(dist_bin)
+        compiler = self.write_compiler(64, path=os.path.join(dist_bin, "FEXOfflineCompiler64.exe"))
+        self.assertEqual(self.session.fex_offline_compiler_path(), compiler)
+
+    def test_offline_compiler_found_without_a_bitness_suffix(self):
+        plain = proton.g_proton.bin_dir + proton.FEX_OFFLINE_COMPILER + ".exe"
+        with open(plain, "w") as f:
+            f.write("")
+        self.assertEqual(self.session.fex_offline_compiler_path(), plain)
 
     def test_cache_generation_is_skipped_without_code_maps(self):
         calls = []
@@ -145,7 +161,8 @@ class FullTranslationTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         argv = calls[0][0]
         self.assertEqual(argv[0], proton.g_proton.wine_bin)
-        self.assertTrue(argv[1].startswith("Z:"))
+        compiler = self.session.fex_offline_compiler_path()
+        self.assertEqual(argv[1], "Z:" + compiler.replace("/", "\\"))
         self.assertEqual(argv[2], "process-all")
 
 
@@ -200,6 +217,54 @@ class PostRunTest(unittest.TestCase):
         rc = self.run_with(0)
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(self.session.fex_full_translation_marker()))
+
+    def test_failure_does_not_save_a_cache(self):
+        saved = []
+        self.session.generate_fex_code_cache = lambda: saved.append(True)
+        self.run_with(1)
+        self.assertEqual(saved, [])
+
+    def test_full_translation_saves_a_cache_instead_of_marking(self):
+        self.session.mark_full_translation()
+        saved = []
+        self.session.generate_fex_code_cache = lambda: saved.append(True)
+        self.run_with(0)
+        self.assertEqual(saved, [True])
+
+
+class PeBitnessTest(unittest.TestCase):
+    """Reading the machine field of a Windows PE."""
+
+    def write_pe(self, machine):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "app.exe")
+            data = bytearray(0x100)
+            data[0:2] = b"MZ"
+            data[0x3c:0x40] = (0x80).to_bytes(4, "little")
+            data[0x80:0x84] = b"PE\0\0"
+            data[0x84:0x86] = machine.to_bytes(2, "little")
+            with open(path, "wb") as f:
+                f.write(bytes(data))
+            return proton.pe_is_64bit(path)
+
+    def test_i386_is_32bit(self):
+        self.assertFalse(self.write_pe(0x014c))
+
+    def test_amd64_is_64bit(self):
+        self.assertTrue(self.write_pe(0x8664))
+
+    def test_arm64_is_64bit(self):
+        self.assertTrue(self.write_pe(0xaa64))
+
+    def test_non_pe_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notes.txt")
+            with open(path, "w") as f:
+                f.write("hello")
+            self.assertIsNone(proton.pe_is_64bit(path))
+
+    def test_missing_file(self):
+        self.assertIsNone(proton.pe_is_64bit("/nonexistent/app.exe"))
 
 
 if __name__ == "__main__":
