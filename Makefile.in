@@ -883,24 +883,21 @@ $(OBJ)/.fex_unixlib-post-source:
 	touch $@
 
 # The offline compiler turns recorded code maps into a saved cache. FEX builds one
-# per guest bitness and both are installed as the same file name, so install them
-# side by side under distinct names: the launcher picks by guest bitness.
+# per guest bitness and names them FEXOfflineCompiler32/64.exe itself, so they ship
+# side by side and FEX picks the matching one when it processes a code map.
 #
-#   aarch64-windows build -> 32-bit guests (wow64)
-#   arm64ec-windows build -> 64-bit guests
-FEX_OFFLINE_COMPILER := FEXOfflineCompiler
+#   aarch64-windows build -> FEXOfflineCompiler32.exe (32-bit guests)
+#   arm64ec-windows build -> FEXOfflineCompiler64.exe (64-bit guests)
 FEX_OFFLINE_COMPILER_DIR := $(DST_DIR)/bin-arm64
 
 $(OBJ)/.fex-aarch64-post-build:
 	mkdir -p $(FEX_OFFLINE_COMPILER_DIR)
-	cp -a $(FEX_aarch64_DST)/bin/$(FEX_OFFLINE_COMPILER).exe \
-	    $(FEX_OFFLINE_COMPILER_DIR)/$(FEX_OFFLINE_COMPILER)32.exe
+	cp -a $(FEX_aarch64_DST)/bin/FEXOfflineCompiler32.exe $(FEX_OFFLINE_COMPILER_DIR)
 	touch $@
 
 $(OBJ)/.fex-arm64ec-post-build:
 	mkdir -p $(FEX_OFFLINE_COMPILER_DIR)
-	cp -a $(FEX_arm64ec_DST)/bin/$(FEX_OFFLINE_COMPILER).exe \
-	    $(FEX_OFFLINE_COMPILER_DIR)/$(FEX_OFFLINE_COMPILER)64.exe
+	cp -a $(FEX_arm64ec_DST)/bin/FEXOfflineCompiler64.exe $(FEX_OFFLINE_COMPILER_DIR)
 	touch $@
 
 FEX_CONFIG_JSON := $(DST_DIR)/share/fex-emu/Config.json
@@ -908,7 +905,15 @@ $(FEX_CONFIG_JSON): $(SRCDIR)/FEX_Config.json
 	mkdir -p $(dir $@)
 	cp -a $< $@
 
-default_pfx: fex $(FEX_CONFIG_JSON)
+# The launcher stamps the translated cache with this revision and rebuilds the
+# cache when it changes, so a Proton or FEX update refreshes the translation
+# automatically instead of reusing code built by an older FEX.
+FEX_VERSION_FILE := $(DST_DIR)/share/fex-emu/version
+$(FEX_VERSION_FILE): $(OBJ)/.fex-post-source
+	mkdir -p $(dir $@)
+	echo "$(shell git -C $(SRCDIR) submodule status -- FEX || echo no-git-repo-info)" > $@
+
+default_pfx: fex $(FEX_CONFIG_JSON) $(FEX_VERSION_FILE)
 endif
 
 

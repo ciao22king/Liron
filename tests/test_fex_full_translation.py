@@ -62,30 +62,30 @@ class FullTranslationTest(unittest.TestCase):
         return compiler
 
     def test_cache_dir_is_next_to_the_prefix(self):
-        self.assertEqual(self.session.fex_cache_dir(), self.tmp.name + "/fex-cache/")
+        self.assertEqual(self.session.fex.cache_dir(), self.tmp.name + "/fex-cache/")
 
     def test_cache_dir_is_given_to_fex_as_a_windows_path(self):
         # FEX reads FEX_APP_CACHE_LOCATION verbatim and prefixes it with \??\,
         # so the value must be a Windows path without a prefix of its own.
-        self.assertEqual(self.session.fex_cache_dir_windows(),
+        self.assertEqual(self.session.fex.cache_dir_windows(),
                          "Z:" + self.tmp.name.replace("/", "\\") + "\\fex-cache\\")
 
     def test_default_is_call_by_call(self):
-        self.assertFalse(self.session.should_translate_whole_app())
+        self.assertFalse(self.session.fex.should_translate_whole_app())
 
     def test_marker_enables_full_translation(self):
-        self.session.mark_full_translation()
-        self.assertTrue(os.path.exists(self.session.fex_full_translation_marker()))
-        self.assertTrue(self.session.should_translate_whole_app())
+        self.session.fex.mark_full_translation()
+        self.assertTrue(os.path.exists(self.session.fex.full_translation_marker()))
+        self.assertTrue(self.session.fex.should_translate_whole_app())
 
     def test_env_var_forces_full_translation(self):
         self.session.env["PROTON_FEX_FULL_TRANSLATION"] = "1"
-        self.assertTrue(self.session.should_translate_whole_app())
+        self.assertTrue(self.session.fex.should_translate_whole_app())
 
     def test_env_var_zero_disables_full_translation(self):
-        self.session.mark_full_translation()
+        self.session.fex.mark_full_translation()
         self.session.env["PROTON_FEX_FULL_TRANSLATION"] = "0"
-        self.assertFalse(self.session.should_translate_whole_app())
+        self.assertFalse(self.session.fex.should_translate_whole_app())
 
     def test_full_translation_config_sets_code_caching(self):
         config = self.session.generate_fex_app_config(full_translation=True)["Config"]
@@ -97,40 +97,34 @@ class FullTranslationTest(unittest.TestCase):
         self.assertNotIn("EnableCodeCachingWIP", config)
 
     def test_offline_compiler_lookup(self):
-        self.assertIsNone(self.session.fex_offline_compiler_path())
+        self.assertIsNone(self.session.fex.offline_compiler_path())
         compiler = self.write_compiler(64)
-        self.assertEqual(self.session.fex_offline_compiler_path(), compiler)
+        self.assertEqual(self.session.fex.offline_compiler_path(), compiler)
 
     def test_offline_compiler_prefers_the_matching_guest_bitness(self):
         compiler32 = self.write_compiler(32)
         compiler64 = self.write_compiler(64)
-        self.assertEqual(self.session.fex_offline_compiler_path(True), compiler64)
-        self.assertEqual(self.session.fex_offline_compiler_path(False), compiler32)
+        self.assertEqual(self.session.fex.offline_compiler_path(True), compiler64)
+        self.assertEqual(self.session.fex.offline_compiler_path(False), compiler32)
 
     def test_offline_compiler_found_in_the_dist(self):
         dist_bin = os.path.join(proton.g_proton.dist_dir, "bin")
         os.makedirs(dist_bin)
         compiler = self.write_compiler(64, path=os.path.join(dist_bin, "FEXOfflineCompiler64.exe"))
-        self.assertEqual(self.session.fex_offline_compiler_path(), compiler)
-
-    def test_offline_compiler_found_without_a_bitness_suffix(self):
-        plain = proton.g_proton.bin_dir + proton.FEX_OFFLINE_COMPILER + ".exe"
-        with open(plain, "w") as f:
-            f.write("")
-        self.assertEqual(self.session.fex_offline_compiler_path(), plain)
+        self.assertEqual(self.session.fex.offline_compiler_path(), compiler)
 
     def test_cache_generation_is_skipped_without_code_maps(self):
         calls = []
         original = proton.subprocess.call
         proton.subprocess.call = lambda *a, **k: calls.append(a)
         try:
-            self.session.generate_fex_code_cache()
+            self.session.fex.save_code_cache()
         finally:
             proton.subprocess.call = original
         self.assertEqual(calls, [])
 
     def test_cache_generation_skipped_without_compiler(self):
-        new_dir = os.path.join(self.session.fex_cache_dir(), "codemap", "new")
+        new_dir = os.path.join(self.session.fex.cache_dir(), "codemap", "new")
         os.makedirs(new_dir)
         with open(os.path.join(new_dir, "app.bin"), "w") as f:
             f.write("x")
@@ -138,13 +132,13 @@ class FullTranslationTest(unittest.TestCase):
         original = proton.subprocess.call
         proton.subprocess.call = lambda *a, **k: calls.append(a)
         try:
-            self.session.generate_fex_code_cache()
+            self.session.fex.save_code_cache()
         finally:
             proton.subprocess.call = original
         self.assertEqual(calls, [])
 
     def test_cache_generation_invokes_offline_compiler(self):
-        new_dir = os.path.join(self.session.fex_cache_dir(), "codemap", "new")
+        new_dir = os.path.join(self.session.fex.cache_dir(), "codemap", "new")
         os.makedirs(new_dir)
         with open(os.path.join(new_dir, "app.bin"), "w") as f:
             f.write("x")
@@ -154,16 +148,85 @@ class FullTranslationTest(unittest.TestCase):
         original = proton.subprocess.call
         proton.subprocess.call = lambda *a, **k: calls.append(a)
         try:
-            self.session.generate_fex_code_cache()
+            self.session.fex.save_code_cache()
         finally:
             proton.subprocess.call = original
 
         self.assertEqual(len(calls), 1)
         argv = calls[0][0]
         self.assertEqual(argv[0], proton.g_proton.wine_bin)
-        compiler = self.session.fex_offline_compiler_path()
+        compiler = self.session.fex.offline_compiler_path()
         self.assertEqual(argv[1], "Z:" + compiler.replace("/", "\\"))
         self.assertEqual(argv[2], "process-all")
+
+
+class CacheVersionTest(unittest.TestCase):
+    """The saved translation is rebuilt when the FEX shipped with Proton changes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        proton.g_compatdata = proton.CompatData(self.tmp.name)
+        proton.g_proton = FakeProton(self.tmp.name)
+        self.session = proton.Session()
+        self.session.log_file = None
+        self._saved_game_id = os.environ.pop("SteamGameId", None)
+        self.version_dir = os.path.join(proton.g_proton.dist_dir, "share", "fex-emu")
+        os.makedirs(self.version_dir, exist_ok=True)
+
+    def tearDown(self):
+        if self._saved_game_id is not None:
+            os.environ["SteamGameId"] = self._saved_game_id
+        self.tmp.cleanup()
+
+    def set_runtime_version(self, text):
+        with open(os.path.join(self.version_dir, "version"), "w") as f:
+            f.write(text)
+
+    def test_no_runtime_version_means_nothing_to_compare(self):
+        self.assertFalse(self.session.fex.cache_is_stale())
+
+    def test_empty_cache_without_a_stamp_is_not_stale(self):
+        self.set_runtime_version("FEX-2610")
+        self.assertFalse(self.session.fex.cache_is_stale())
+
+    def test_unstamped_cache_with_content_is_stale(self):
+        # A cache built before stamps existed must not be trusted blindly.
+        self.set_runtime_version("FEX-2610")
+        os.makedirs(self.session.fex.cache_dir(), exist_ok=True)
+        with open(self.session.fex.cache_dir() + "cache", "w") as f:
+            f.write("x")
+        self.assertTrue(self.session.fex.cache_is_stale())
+
+    def test_cache_is_fresh_once_stamped(self):
+        self.set_runtime_version("FEX-2610")
+        os.makedirs(self.session.fex.cache_dir(), exist_ok=True)
+        self.session.fex.stamp_cache()
+        self.assertFalse(self.session.fex.cache_is_stale())
+
+    def test_a_new_fex_version_makes_the_cache_stale(self):
+        self.set_runtime_version("FEX-2607")
+        os.makedirs(self.session.fex.cache_dir(), exist_ok=True)
+        self.session.fex.stamp_cache()
+        self.assertFalse(self.session.fex.cache_is_stale())
+
+        self.set_runtime_version("FEX-2610")
+        self.assertTrue(self.session.fex.cache_is_stale())
+
+    def test_prepare_drops_a_stale_cache(self):
+        self.set_runtime_version("FEX-2607")
+        os.makedirs(self.session.fex.cache_dir(), exist_ok=True)
+        self.session.fex.stamp_cache()
+
+        self.set_runtime_version("FEX-2610")
+        self.session.fex.prepare()
+        self.assertFalse(os.path.exists(self.session.fex.cache_dir() + "version"))
+
+    def test_prepare_keeps_a_fresh_cache(self):
+        self.set_runtime_version("FEX-2610")
+        os.makedirs(self.session.fex.cache_dir(), exist_ok=True)
+        self.session.fex.stamp_cache()
+        self.session.fex.prepare()
+        self.assertTrue(os.path.exists(self.session.fex.cache_dir() + "version"))
 
 
 class MarkerFileTest(unittest.TestCase):
@@ -172,8 +235,8 @@ class MarkerFileTest(unittest.TestCase):
             proton.g_compatdata = proton.CompatData(tmp)
             session = proton.Session()
             session.log_file = None
-            session.mark_full_translation()
-            with open(session.fex_full_translation_marker()) as f:
+            session.fex.mark_full_translation()
+            with open(session.fex.full_translation_marker()) as f:
                 self.assertIn("translated as a whole", f.read())
 
 
@@ -211,23 +274,23 @@ class PostRunTest(unittest.TestCase):
     def test_failure_marks_full_translation(self):
         rc = self.run_with(1)
         self.assertEqual(rc, 1)
-        self.assertTrue(os.path.exists(self.session.fex_full_translation_marker()))
+        self.assertTrue(os.path.exists(self.session.fex.full_translation_marker()))
 
     def test_success_does_not_mark_full_translation(self):
         rc = self.run_with(0)
         self.assertEqual(rc, 0)
-        self.assertFalse(os.path.exists(self.session.fex_full_translation_marker()))
+        self.assertFalse(os.path.exists(self.session.fex.full_translation_marker()))
 
     def test_failure_does_not_save_a_cache(self):
         saved = []
-        self.session.generate_fex_code_cache = lambda: saved.append(True)
+        self.session.fex.save_code_cache = lambda: saved.append(True)
         self.run_with(1)
         self.assertEqual(saved, [])
 
     def test_full_translation_saves_a_cache_instead_of_marking(self):
-        self.session.mark_full_translation()
+        self.session.fex.mark_full_translation()
         saved = []
-        self.session.generate_fex_code_cache = lambda: saved.append(True)
+        self.session.fex.save_code_cache = lambda: saved.append(True)
         self.run_with(0)
         self.assertEqual(saved, [True])
 
